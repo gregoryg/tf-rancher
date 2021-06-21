@@ -37,9 +37,9 @@ variable "logchart" {
 
 # Hack: Time to wait for Kubernetes to deploy
 variable "delaysec" {
-	default = 240
+	default = 480
 }
 
-variable "rancher-url" { }
+# variable "rancher-url" { }
 
-variable "rancher-token" { }
+# variable "rancher-token" { }
