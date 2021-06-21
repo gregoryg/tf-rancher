@@ -6,8 +6,8 @@ resource "random_id" "instance_id" {
 }
 
 # Rancher cluster
-resource "rancher2_cluster" "cluster_gcp" {
-  name         = "gcp-${random_id.instance_id.hex}"
+resource "rancher2_cluster" "cluster_gg" {
+  name         = "gg-ha-test-${random_id.instance_id.hex}"
   description  = "Terraform"
 
   rke_config {
@@ -31,9 +31,73 @@ resource "rancher2_cluster" "cluster_gcp" {
   }
 }
 
-# Worker nodes and control plane
-resource "google_compute_instance" "vm_gcp" {
-  name         = "gg-rke-${random_id.instance_id.hex}-${count.index}"
+# resource "rancher2_node_pool" "masters" {
+#   cluster_id = rancher2_cluster.cluster_gg.id
+#   name = "control-etcd"
+#   hostname_prefix = "gg-control-etcd"
+#   node_template_id = google_compute_instance.vm_gg.id
+#   quantity = 1
+#   control_plane = true
+#   etcd = true
+#   worker = false
+# }
+
+# resource "rancher2_node_pool" "workers" {
+#   cluster_id = rancher2_cluster.cluster_gg.id
+#   name = "control-etcd"
+#   hostname_prefix = "gg-control-etcd"
+#   node_template_id = google_compute_instance.vm_gg.id
+#   quantity = 1
+#   control_plane = false
+#   etcd = false
+#   worker = true
+# }
+
+# disks for workers
+# TODO: parameterize count of workers
+resource "google_compute_disk" "worker_disk" {
+  count = var.numnodes
+  name = "gg-wdisk-${count.index}"
+  type = "pd-ssd"
+  size = "200"
+  labels = {
+    owner = "greg_grubbs"
+    donotodelete = "true"
+  }
+  # zone = ?
+}
+# Worker control plane/etcd and worker nodes
+resource "google_compute_instance" "vm_gg_control" {
+  name         = "gg-c-${random_id.instance_id.hex}-${count.index}"
+  machine_type = var.type
+  count = var.ctlnumnodes
+
+  boot_disk {
+    initialize_params {
+      image = var.image
+      size = var.disksize
+    }
+  }
+
+  metadata = {
+     ssh-keys = "rancher:${file("~/.ssh/google_compute_engine.pub")}"
+  }
+
+  metadata_startup_script = data.template_file.startup-script_data_control.rendered
+
+  tags = ["http-server", "https-server"]
+
+  network_interface {
+    # A default network is created for all GG projects
+    network       = "default"
+    access_config {
+    }
+  }
+}
+
+resource "google_compute_instance" "vm_gg_work" {
+  # TODO: use parameterized count of *worker* nodes
+  name         = "gg-w-${random_id.instance_id.hex}-${count.index}"
   machine_type = var.type
   count = var.numnodes
 
@@ -44,16 +108,20 @@ resource "google_compute_instance" "vm_gcp" {
     }
   }
 
+  attached_disk {
+    source = google_compute_disk.worker_disk[count.index].name
+  }
+
   metadata = {
      ssh-keys = "rancher:${file("~/.ssh/id_rsa.pub")}"
   }
 
-  metadata_startup_script = data.template_file.startup-script_data.rendered
+  metadata_startup_script = data.template_file.startup-script_data_worker.rendered
 
   tags = ["http-server", "https-server"]
 
   network_interface {
-    # A default network is created for all GCP projects
+    # A default network is created for all GG projects
     network       = "default"
     access_config {
     }
@@ -62,13 +130,27 @@ resource "google_compute_instance" "vm_gcp" {
 
 # Delay hack part 1
 resource "null_resource" "before" {
-  depends_on = [rancher2_cluster.cluster_gcp]
+  depends_on = [rancher2_cluster.cluster_gg]
 }
 
 # Delay hack part 2
 resource "null_resource" "delay" {
+  # depends_on = [rancher2_cluster.cluster_gg, google_compute_instance.vm_gg_control]
   provisioner "local-exec" {
+    # command = "until echo \"${rancher2_cluster.cluster_gg.kube_config}\" > /tmp/k.yaml && kubectl --kubeconfig /tmp/k.yaml get cs ; do sleep 20s; done"
     command = "sleep ${var.delaysec}"
+#     command = <<EOF
+# while [ "$${resp}" != pong ]; do
+#   resp=$(curl -sSk -m 2 --insecure "$${CLUSTER_URL}/ping")
+#   echo "Rancher response: $${resp}"
+#   if [ "$${resp}" != "pong" ]; then
+#     sleep 10
+#   fi
+# done
+# EOF
+#     environment = {
+#       CLUSTER_URL = var.rancher-url
+#     }
   }
 
   triggers = {
@@ -79,18 +161,18 @@ resource "null_resource" "delay" {
 # Kubeconfig file
 resource "local_file" "kubeconfig" {
   filename = "${path.module}/.kube/config"
-  content = rancher2_cluster.cluster_gcp.kube_config
+  content = rancher2_cluster.cluster_gg.kube_config
   file_permission = "0600"
 
   depends_on = [null_resource.delay]
 }
 
 # Cluster monitoring
-resource "rancher2_app_v2" "monitor_gcp" {
+resource "rancher2_app_v2" "monitor_gg" {
   lifecycle {
     ignore_changes = all
   }
-  cluster_id = rancher2_cluster.cluster_gcp.id
+  cluster_id = rancher2_cluster.cluster_gg.id
   name = "rancher-monitoring"
   namespace = "cattle-monitoring-system"
   repo_name = "rancher-charts"
@@ -98,35 +180,38 @@ resource "rancher2_app_v2" "monitor_gcp" {
   chart_version = var.monchart
   values = templatefile("${path.module}/files/values.yaml", {})
 
-  depends_on = [local_file.kubeconfig,rancher2_cluster.cluster_gcp,google_compute_instance.vm_gcp]
+  # depends_on = [local_file.kubeconfig,rancher2_cluster.cluster_gg,google_compute_instance.vm_gg_control]
+  depends_on = [local_file.kubeconfig, google_compute_instance.vm_gg_control]
 }
 
 # Cluster logging CRD
-resource "rancher2_app_v2" "syslog_crd_gcp" {
+resource "rancher2_app_v2" "syslog_crd_gg" {
   lifecycle {
     ignore_changes = all
   }
-  cluster_id = rancher2_cluster.cluster_gcp.id
+  cluster_id = rancher2_cluster.cluster_gg.id
   name = "rancher-logging-crd"
   namespace = "cattle-logging-system"
   repo_name = "rancher-charts"
   chart_name = "rancher-logging-crd"
   chart_version = var.logchart
 
-  depends_on = [rancher2_app_v2.monitor_gcp,rancher2_cluster.cluster_gcp,google_compute_instance.vm_gcp]
+  # depends_on = [rancher2_app_v2.monitor_gg,rancher2_cluster.cluster_gg,google_compute_instance.vm_gg_work,google_compute_instance.vm_gg_control]
+  depends_on = [rancher2_app_v2.monitor_gg]
 }
 
 # Cluster logging
-resource "rancher2_app_v2" "syslog_gcp" {
+resource "rancher2_app_v2" "syslog_gg" {
   lifecycle {
     ignore_changes = all
   }
-  cluster_id = rancher2_cluster.cluster_gcp.id
+  cluster_id = rancher2_cluster.cluster_gg.id
   name = "rancher-logging"
   namespace = "cattle-logging-system"
   repo_name = "rancher-charts"
   chart_name = "rancher-logging"
   chart_version = var.logchart
 
-  depends_on = [rancher2_app_v2.syslog_crd_gcp,rancher2_cluster.cluster_gcp,google_compute_instance.vm_gcp]
+  # depends_on = [rancher2_app_v2.syslog_crd_gg,rancher2_cluster.cluster_gg,google_compute_instance.vm_gg_control,google_compute_instance.vm_gg_work]
+  depends_on = [rancher2_app_v2.syslog_crd_gg]
 }

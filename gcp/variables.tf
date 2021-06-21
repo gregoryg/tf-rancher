@@ -17,12 +17,17 @@ variable "type" {
 
 # Kubernetes version
 variable "k8version" {
-	default = "v1.18.14-rancher1-1"
+	default = "v1.19.10-rancher1-1"
 }
 
-# Number of nodes
-variable "numnodes" {
+# Number of controlplane/etcd nodes
+variable "ctlnumnodes" {
 	default = 3
+}
+
+# number of worker nodes
+variable "numnodes" {
+  default = 3
 }
 
 # Monitoring chart
@@ -37,7 +42,7 @@ variable "logchart" {
 
 # Hack: Time to wait for Kubernetes to deploy
 variable "delaysec" {
-	default = 480
+	default = 420
 }
 
 # variable "rancher-url" { }
